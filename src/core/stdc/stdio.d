@@ -32,6 +32,9 @@ private
   }
 }
 
+// uncomment for MSVCRT >= 14 (VS 2015)
+//version(LDC) { version(Win64) version = LDC_MSVCRT14; }
+
 extern (C):
 @system:
 nothrow:
@@ -77,19 +80,29 @@ else version( CRuntime_Microsoft )
         ///
         FILENAME_MAX = 260,
         ///
-        TMP_MAX      = 32767,
-        ///
         _SYS_OPEN    = 20,      // non-standard
     }
 
+    enum int _NFILE  = 512;     // non-standard
+
+  version( LDC_MSVCRT14 ) // requires MSVCRT >= 14 (VS 2015)
+  {
     ///
-    enum int     _NFILE     = 512;       // non-standard
+    enum int TMP_MAX        = int.max;
+    ///
+    enum int L_tmpnam       = 260;
+  }
+  else
+  {
+    ///
+    enum int     TMP_MAX    = short.max;
     ///
     enum string  _P_tmpdir  = "\\"; // non-standard
     ///
     enum wstring _wP_tmpdir = "\\"; // non-standard
     ///
     enum int     L_tmpnam   = _P_tmpdir.length + 12;
+  }
 }
 else version( linux )
 {
@@ -259,8 +272,18 @@ version( CRuntime_DigitalMars )
 else version( CRuntime_Microsoft )
 {
     ///
-    alias int fpos_t; //check this
+    alias long fpos_t;
 
+  version( LDC_MSVCRT14 ) // requires MSVCRT >= 14 (VS 2015)
+  {
+    ///
+    struct _iobuf
+    {
+        void* _Placeholder;
+    }
+  }
+  else
+  {
     ///
     struct _iobuf
     {
@@ -273,6 +296,7 @@ else version( CRuntime_Microsoft )
         int   _bufsiz;
         char* _tmpfname;
     }
+  }
 
     ///
     alias shared(_iobuf) FILE;
@@ -549,38 +573,52 @@ else version( CRuntime_Microsoft )
         _IOLBF   = 0x40,
         ///
         _IONBF   = 4,
-        ///
-        _IOREAD  = 1,     // non-standard
-        ///
-        _IOWRT   = 2,     // non-standard
-        ///
-        _IOMYBUF = 8,     // non-standard
-        ///
-        _IOEOF   = 0x10,  // non-standard
-        ///
-        _IOERR   = 0x20,  // non-standard
-        ///
-        _IOSTRG  = 0x40,  // non-standard
-        ///
-        _IORW    = 0x80,  // non-standard
-        ///
-        _IOAPP   = 0x200, // non-standard
-        ///
-        _IOAPPEND = 0x200, // non-standard
     }
 
     extern shared void function() _fcloseallp;
 
-    private extern shared FILE[_NFILE] _iob;
+    version( LDC_MSVCRT14 ) // requires MSVCRT >= 14 (VS 2015)
+    {
+        shared(FILE)* __acrt_iob_func(uint);
+        ///
+        shared FILE* stdin;  // = __acrt_iob_func(0);
+        ///
+        shared FILE* stdout; // = __acrt_iob_func(1);
+        ///
+        shared FILE* stderr; // = __acrt_iob_func(2);
+    }
+    else
+    {
+      enum
+      {
+        ///
+        _IOREAD   = 1,     // non-standard
+        ///
+        _IOWRT    = 2,     // non-standard
+        ///
+        _IOMYBUF  = 8,     // non-standard
+        ///
+        _IOEOF    = 0x10,  // non-standard
+        ///
+        _IOERR    = 0x20,  // non-standard
+        ///
+        _IOSTRG   = 0x40,  // non-standard
+        ///
+        _IORW     = 0x80,  // non-standard
+        ///
+        _IOAPP    = 0x200, // non-standard
+        ///
+        _IOAPPEND = 0x200, // non-standard
+      }
 
-    shared(FILE)* __iob_func();
-
-    ///
-    shared FILE* stdin;  // = &__iob_func()[0];
-    ///
-    shared FILE* stdout; // = &__iob_func()[1];
-    ///
-    shared FILE* stderr; // = &__iob_func()[2];
+        shared(FILE)* __iob_func();
+        ///
+        shared FILE* stdin;  // = &__iob_func()[0];
+        ///
+        shared FILE* stdout; // = &__iob_func()[1];
+        ///
+        shared FILE* stderr; // = &__iob_func()[2];
+    }
 }
 else version( linux )
 {
@@ -800,6 +838,100 @@ version (MinGW)
     ///
     alias __mingw_scanf scanf;
 }
+else version (LDC_MSVCRT14) // requires MSVCRT >= 14 (VS 2015)
+{
+  // MS define the *printf and *scanf function families inline,
+  // forwarding to 4 basic functions.
+  // We implement corresponding D wrappers around these basic functions.
+
+  private
+  {
+    enum _CRT_INTERNAL_PRINTF_STANDARD_SNPRINTF_BEHAVIOR = 2;
+
+    int __stdio_common_vfprintf(ulong _Options, FILE* _Stream,
+        in char* _Format, void* _Locale, va_list _ArgList);
+    int __stdio_common_vsprintf(ulong _Options, char* _Buffer, size_t _BufferCount,
+        in char* _Format, void* _Locale, va_list _ArgList);
+
+    int __stdio_common_vfscanf(ulong _Options, FILE* _Stream,
+        in char* _Format, void* _Locale, va_list _Arglist);
+    int __stdio_common_vsscanf(ulong _Options, in char* _Buffer, size_t _BufferCount,
+        in char* _Format, void* _Locale, va_list _ArgList);
+  }
+
+  extern (D)
+  {
+    // *printf:
+
+    int vfprintf(FILE* stream, in char* format, va_list args)
+    {
+        return __stdio_common_vfprintf(0, stream, format, null, args);
+    }
+    int fprintf(FILE* stream, in char* format, ...)
+    {
+        va_list args;
+        va_start(args, format);
+        return vfprintf(stream, format, args);
+    }
+
+    int vprintf(in char* format, va_list args)
+    {
+        return vfprintf(stdout, format, args);
+    }
+    int printf(in char* format, ...)
+    {
+        va_list args;
+        va_start(args, format);
+        return vprintf(format, args);
+    }
+
+    int vsprintf(char* s, in char* format, va_list args)
+    {
+        return vsnprintf(s, size_t.max, format, args);
+    }
+    int sprintf(char* s, in char* format, ...)
+    {
+        va_list args;
+        va_start(args, format);
+        return vsprintf(s, format, args);
+    }
+
+    // *scanf:
+
+    int vfscanf(FILE* stream, in char* format, va_list args)
+    {
+        return __stdio_common_vfscanf(0, stream, format, null, args);
+    }
+    int fscanf(FILE* stream, in char* format, ...)
+    {
+        va_list args;
+        va_start(args, format);
+        return vfscanf(stream, format, args);
+    }
+
+    int vscanf(in char* format, va_list args)
+    {
+        return vfscanf(stdin, format, args);
+    }
+    int scanf(in char* format, ...)
+    {
+        va_list args;
+        va_start(args, format);
+        return vscanf(format, args);
+    }
+
+    int vsscanf(in char* s, in char* format, va_list args)
+    {
+        return __stdio_common_vsscanf(0, s, size_t.max, format, null, args);
+    }
+    int sscanf(in char* s, in char* format, ...)
+    {
+        va_list args;
+        va_start(args, format);
+        return vsscanf(s, format, args);
+    }
+  }
+}
 else
 {
     ///
@@ -941,21 +1073,61 @@ else version( CRuntime_DigitalMars )
 }
 else version( CRuntime_Microsoft )
 {
-  // No unsafe pointer manipulation.
-  extern (D) @trusted
+  version( LDC_MSVCRT14 ) // requires MSVCRT >= 14 (VS 2015)
   {
-      ///
-    void rewind(FILE* stream)   { fseek(stream,0L,SEEK_SET); stream._flag = stream._flag & ~_IOERR; }
-    ///
-    pure void clearerr(FILE* stream) { stream._flag = stream._flag & ~(_IOERR|_IOEOF);                 }
-    ///
-    pure int  feof(FILE* stream)     { return stream._flag&_IOEOF;                       }
-    ///
-    pure int  ferror(FILE* stream)   { return stream._flag&_IOERR;                       }
-    ///
-    pure int  fileno(FILE* stream)   { return stream._file;                              }
+    // No unsafe pointer manipulation.
+    @trusted
+    {
+        ///
+             void rewind(FILE* stream);
+        ///
+        pure void clearerr(FILE* stream);
+        ///
+        pure int  feof(FILE* stream);
+        ///
+        pure int  ferror(FILE* stream);
+        ///
+        pure int  fileno(FILE* stream);
+    }
+
+    extern (D)
+    {
+        ///
+        int vsnprintf(char* s, size_t n, in char* format, va_list args)
+        {
+            int result = __stdio_common_vsprintf(
+                _CRT_INTERNAL_PRINTF_STANDARD_SNPRINTF_BEHAVIOR,
+                s, n, format, null, args);
+            return result < 0 ? -1 : result;
+        }
+
+        ///
+        int snprintf(char* s, size_t n, in char* format, ...)
+        {
+            va_list args;
+            va_start(args, format);
+            return vsnprintf(s, n, format, args);
+        }
+    }
   }
-  ///
+  else
+  {
+    // No unsafe pointer manipulation.
+    extern (D) @trusted
+    {
+        ///
+             void rewind(FILE* stream)   { fseek(stream, 0L, SEEK_SET); stream._flag = stream._flag & ~_IOERR; }
+        ///
+        pure void clearerr(FILE* stream) { stream._flag = stream._flag & ~(_IOERR | _IOEOF); }
+        ///
+        pure int  feof(FILE* stream)     { return stream._flag & _IOEOF; }
+        ///
+        pure int  ferror(FILE* stream)   { return stream._flag & _IOERR; }
+        ///
+        pure int  fileno(FILE* stream)   { return stream._file; }
+    }
+
+    ///
     int   _snprintf(char* s, size_t n, in char* fmt, ...);
     ///
     alias _snprintf snprintf;
@@ -1002,6 +1174,7 @@ else version( CRuntime_Microsoft )
         else
             return _filbuf(fp);
     }
+  }
 
     ///
     int _lock_file(FILE *fp);

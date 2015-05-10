@@ -26,6 +26,7 @@ bool tester()
 
     if (auto fp = getModuleInfo(name).unitTest)
     {
+        /*
         try
         {
             immutable t0 = MonoTime.currTime;
@@ -44,6 +45,8 @@ bool tester()
                 cast(uint)msg.length, msg.ptr);
             return false;
         }
+        */
+        fp();
     }
     return true;
 }

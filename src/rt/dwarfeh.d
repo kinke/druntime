@@ -11,6 +11,17 @@
 
 module rt.dwarfeh;
 
+version (LDC)
+{
+    version (ARM)
+    {
+        version (iOS)
+            version = SjLj_Exceptions;
+        else
+            version = ARM_EABI_UNWINDER;
+    }
+}
+
 version (Posix):
 
 import rt.dmain2: _d_print_throwable;
@@ -136,8 +147,13 @@ struct ExceptionHeader
  * Returns:
  *      object that was caught
  */
-extern(C) Throwable __dmd_begin_catch(_Unwind_Exception* exceptionObject)
+// LDC: changed from `extern(C) Throwable __dmd_begin_catch(_Unwind_Exception* exceptionObject)`
+extern(C) Object _d_eh_enter_catch(_Unwind_Exception* exceptionObject)
 {
+    version (ARM_EABI_UNWINDER)
+    {
+        _Unwind_Complete(exceptionObject);
+    }
     ExceptionHeader *eh = ExceptionHeader.toExceptionHeader(exceptionObject);
     //printf("__dmd_begin_catch(%p), object = %p\n", eh, eh.object);
 
@@ -176,8 +192,10 @@ extern(C) void* _d_eh_swapContextDwarf(void* newContext) nothrow @nogc
  * Returns:
  *      doesn't return
  */
-extern(C) void _d_throwdwarf(Throwable o)
+// LDC: changed from `extern(C) void _d_throwdwarf(Throwable o)`
+extern(C) void _d_throw_exception(Object e)
 {
+    auto o = cast(Throwable) e;
     ExceptionHeader *eh = ExceptionHeader.create(o);
 
     eh.push();  // add to thrown exception stack
@@ -248,6 +266,50 @@ extern(C) void _d_throwdwarf(Throwable o)
 }
 
 
+version (LDC)
+{
+    extern(C):
+
+    /// Called by our compiler-generate code to resume unwinding after a finally
+    /// block (or dtor destruction block) has been run.
+    version (ARM_EABI_UNWINDER)
+    {
+        // Implemented in asm to preserve core registers, declaration here
+        // for reference only
+        void _d_eh_resume_unwind(void* ptr);
+
+        // Perform cleanups before resuming.  Can't call _Unwind_Resume
+        // because it expects core register state at callsite.
+        //
+        // Also, a workaround for ARM EABI unwinding.  When D catch
+        // handlers are merged by the LLVM inliner, the IR has a landing
+        // pad that claims it will handle multiple exception types, but
+        // then only handles one and falls into _d_eh_resume_unwind.  This
+        // call to _d_eh_resume_unwind has a landing pad with the correct
+        // exception handler, but gcc ARM EABI unwind implementation
+        // resumes in the next frame up and misses it. Other gcc
+        // unwinders, C++ Itanium and SjLj, handle this case fine by
+        // resuming in the current frame.  The workaround is to save IP so
+        // personality can resume in the current frame.
+        _Unwind_Exception* _d_arm_eabi_end_cleanup(_Unwind_Exception* ptr, ptrdiff_t ip)
+        {
+            debug(EH_personality_verbose) printf("  - Resume ip %p\n", ip);
+            // tell personality the real IP (cleanup_cache can be used
+            // however we like)
+            ptr.cleanup_cache.bitpattern[0] = ip;
+            return ptr;
+        }
+    }
+    else
+    {
+        void _d_eh_resume_unwind(void* ptr)
+        {
+            _Unwind_Resume(cast(_Unwind_Exception*) ptr);
+        }
+    }
+}
+
+
 /*****************************************
  * "personality" function, specific to each language.
  * This one, of course, is specific to DMD.
@@ -273,7 +335,8 @@ extern(C) void _d_throwdwarf(Throwable o)
  *      http://www.ucw.cz/~hubicka/papers/abi/node25.html
  */
 
-extern (C) _Unwind_Reason_Code __dmd_personality_v0(int ver, _Unwind_Action actions,
+// LDC: renamed from `__dmd_personality_v0`
+extern (C) _Unwind_Reason_Code _d_eh_personality(int ver, _Unwind_Action actions,
                _Unwind_Exception_Class exceptionClass, _Unwind_Exception* exceptionObject,
                _Unwind_Context* context)
 {
@@ -647,11 +710,19 @@ LsdaResult scanLSDA(const(ubyte)* lsda, _Unwind_Ptr ip, _Unwind_Exception_Class 
     {
         if (p >= pActionTable)
         {
-            if (p == pActionTable)
+            version (LDC)
+            {
+                noAction = true;
                 break;
-            fprintf(stderr, "no Call Site Table\n");
+            }
+            else
+            {
+                if (p == pActionTable)
+                    break;
+                fprintf(stderr, "no Call Site Table\n");
 
-            return LsdaResult.corrupt;
+                return LsdaResult.corrupt;
+            }
         }
 
         _Unwind_Ptr CallSiteStart = dw_pe_value(CallSiteFormat);
@@ -663,41 +734,83 @@ LsdaResult scanLSDA(const(ubyte)* lsda, _Unwind_Ptr ip, _Unwind_Exception_Class 
                 //cast(int)CallSiteStart, cast(int)CallSiteRange, cast(int)LandingPad, cast(int)ActionRecordPtr);
 
         if (ipoffset < CallSiteStart)
+        {
+            version (LDC)
+            {
+                noAction = true;
+            }
             break;
+        }
 
         // The most nested entry will be the last one that ip is in
         if (ipoffset < CallSiteStart + CallSiteRange)
         {
             //printf("\tmatch\n");
-            if (ActionRecordPtr)                // if saw a catch
+            version (LDC)
             {
-                if (cleanupsOnly)
-                    continue;                   // ignore catch
-
-                auto h = actionTableLookup(exceptionObject, cast(uint)ActionRecordPtr, pActionTable, tt, TType, exceptionClass);
-                if (h < 0)
-                {
-                    fprintf(stderr, "negative handler\n");
-                    return LsdaResult.corrupt;
-                }
-                if (h == 0)
-                    continue;                   // ignore
-
-                // The catch is good
-                noAction = false;
-                landingPad = LandingPad;
-                handler = h;
-            }
-            else if (LandingPad)                // if saw a cleanup
-            {
-                if (preferHandler && handler)   // enclosing handler overrides cleanup
-                    continue;                   // keep looking
-                noAction = false;
-                landingPad = LandingPad;
-                handler = 0;                    // cleanup hides the handler
-            }
-            else                                // take no action
                 noAction = true;
+
+                // If there is no landing pad for this part of the frame, continue with the next level.
+                if (!LandingPad)
+                    break;
+
+                if (ActionRecordPtr)                // if saw a catch
+                {
+                    if (cleanupsOnly)
+                        break;
+
+                    auto h = actionTableLookup(exceptionObject, cast(uint)ActionRecordPtr, pActionTable, tt, TType, exceptionClass);
+                    if (h < 0)
+                    {
+                        fprintf(stderr, "negative handler\n");
+                        return LsdaResult.corrupt;
+                    }
+
+                    // The catch (or cleanup for h == 0) is good
+                    noAction = false;
+                    landingPad = LandingPad;
+                    handler = h;
+                }
+                else                                // if saw a cleanup
+                {
+                    noAction = false;
+                    landingPad = LandingPad;
+                }
+
+                break;
+            }
+            else
+            {
+                if (ActionRecordPtr)                // if saw a catch
+                {
+                    if (cleanupsOnly)
+                        continue;                   // ignore catch
+
+                    auto h = actionTableLookup(exceptionObject, cast(uint)ActionRecordPtr, pActionTable, tt, TType, exceptionClass);
+                    if (h < 0)
+                    {
+                        fprintf(stderr, "negative handler\n");
+                        return LsdaResult.corrupt;
+                    }
+                    if (h == 0)
+                        continue;                   // ignore
+
+                    // The catch is good
+                    noAction = false;
+                    landingPad = LandingPad;
+                    handler = h;
+                }
+                else if (LandingPad)                // if saw a cleanup
+                {
+                    if (preferHandler && handler)   // enclosing handler overrides cleanup
+                        continue;                   // keep looking
+                    noAction = false;
+                    landingPad = LandingPad;
+                    handler = 0;                    // cleanup hides the handler
+                }
+                else                                // take no action
+                    noAction = true;
+            }
         }
     }
 
@@ -750,6 +863,12 @@ int actionTableLookup(_Unwind_Exception* exceptionObject, uint actionRecordPtr, 
 
         //printf(" at: TypeFilter = %d, NextRecordPtr = %d\n", cast(int)TypeFilter, cast(int)NextRecordPtr);
 
+        version (LDC)
+        {
+            // zero means cleanup
+            if (TypeFilter == 0)
+                return 0;
+        }
         if (TypeFilter <= 0)                    // should never happen with DMD generated tables
         {
             fprintf(stderr, "TypeFilter = %d\n", cast(int)TypeFilter);

@@ -11,13 +11,6 @@
 
 module rt.deh;
 
-version (LDC)
-{
-    // We use a libunwind-based EH scheme on all platforms.
-}
-else
-{
-
 extern (C)
 {
     Throwable.TraceInfo _d_traceContext(void* ptr = null);
@@ -32,6 +25,13 @@ extern (C)
         }
     }
 }
+
+version (LDC)
+{
+    // We use a libunwind-based EH scheme on all platforms.
+}
+else
+{
 
 version (Win32)
     public import rt.deh_win32;

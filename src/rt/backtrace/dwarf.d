@@ -22,6 +22,10 @@ version(has_backtrace):
 import rt.util.container.array;
 import rt.backtrace.elf;
 
+version (linux) import core.sys.linux.dlfcn;
+else version (FreeBSD) import core.sys.freebsd.dlfcn;
+else version (DragonFlyBSD) import core.sys.dragonflybsd.dlfcn;
+
 import core.stdc.string : strlen, memchr, memcpy;
 
 //debug = DwarfDebugMachine;
@@ -73,6 +77,8 @@ else
     Array!Location locations;
     if (ElfFile.openSelf(&file))
     {
+        const isDynamicSharedObject = (file.ehdr.e_type == ET_DYN);
+
         auto stringSectionHeader = ElfSectionHeader(&file, file.ehdr.e_shstrndx);
         auto stringSection = ElfSection(&file, &stringSectionHeader);
 
@@ -86,7 +92,18 @@ else
             // resolve addresses
             locations.length = callstack.length;
             foreach(size_t i; 0 .. callstack.length)
+            {
                 locations[i].address = cast(size_t) callstack[i];
+                if (isDynamicSharedObject)
+                {
+                    // make address relative to its shared object, as the DWARF addresses are
+                    // TODO: only for addresses in the shared object whose debuginfos we're reading
+                    Dl_info info = void;
+                    if (dladdr(cast(void*) locations[i].address, &info) != 0)
+                        locations[i].address -= cast(size_t) info.dli_fbase;
+                }
+                debug(DwarfDebugMachine) printf("Location: %p\n", locations[i].address);
+            }
 
             resolveAddresses(&dbgSection, locations[]);
         }
